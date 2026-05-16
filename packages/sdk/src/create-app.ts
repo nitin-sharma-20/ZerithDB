@@ -3,6 +3,8 @@ import type { ZerithDBConfig } from "zerithdb-core";
 import { MemoryCollector, estimateStorageBytes } from "zerithdb-devtools";
 import { ZerithDBError, ErrorCode } from "zerithdb-core";
 import { DbClient, CollectionClient } from "./db-client.js";
+import type { CloudBackupTarget, LocalCloudBackupOptions } from "./db-client.js";
+import { LocalCloudBackupAdapter } from "./db-client.js";
 import { SyncEngine } from "./sync-engine.js";
 import { AuthManager } from "./auth-manager.js";
 import { NetworkManager } from "./network-manager.js";
@@ -35,6 +37,12 @@ export interface ZerithDBApp {
 
   /** P2P network manager — WebRTC peer connections and signaling */
   network: NetworkManager;
+
+  /**
+   * Create a local cloud backup adapter. The adapter exports configured
+   * IndexedDB collections and uploads the JSON snapshot through the target.
+   */
+  backup(target: CloudBackupTarget, options?: LocalCloudBackupOptions): LocalCloudBackupAdapter;
 
   /** Underlying app configuration */
   config: Readonly<ZerithDBConfig>;
@@ -104,8 +112,6 @@ export function createApp(config: ZerithDBConfig): ZerithDBApp {
   const network = new NetworkManager(resolvedConfig, auth);
   const sync = new SyncEngine(resolvedConfig, db, network);
 
-  const collectionCache = new Map<string, CollectionClient<any>>();
-
   let memoryCollector: MemoryCollector | null = null;
   if (resolvedConfig.debug?.devtools === true) {
     memoryCollector = new MemoryCollector({
@@ -125,23 +131,31 @@ export function createApp(config: ZerithDBConfig): ZerithDBApp {
     memoryCollector.start();
   }
 
+  const backupAdapters = new Set<LocalCloudBackupAdapter>();
+
   return {
     config: Object.freeze(resolvedConfig),
 
     db<T extends Record<string, any>>(name: string): CollectionClient<T> {
-      if (!collectionCache.has(name)) {
-        collectionCache.set(name, db.collection(name));
-      }
-      // biome-ignore lint: cache guarantees this is defined
-      return collectionCache.get(name) as CollectionClient<T>;
+      // DbClient already caches collection instances internally —
+      // no need for a second cache layer here.
+      return db.collection<T>(name);
     },
 
     sync,
     auth,
     network,
 
+    backup(target: CloudBackupTarget, options?: LocalCloudBackupOptions): LocalCloudBackupAdapter {
+      const adapter = new LocalCloudBackupAdapter(db, target, options);
+      backupAdapters.add(adapter);
+      return adapter;
+    },
+
     async dispose(): Promise<void> {
       memoryCollector?.stop();
+      await Promise.all(Array.from(backupAdapters).map((a) => a.stop()));
+      backupAdapters.clear();
       await Promise.all([sync.dispose(), network.dispose(), db.dispose()]);
     },
   };
