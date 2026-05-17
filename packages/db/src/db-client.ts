@@ -99,7 +99,8 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
       `Failed to query collection "${this.collectionName}"`,
       async () => {
         const all = await this.table.toArray();
-        return all.filter((doc) => this.matchesFilter(doc, filter));
+        const compiledFilter = this.precompileRegexes(filter);
+        return all.filter((doc) => this.matchesFilter(doc, compiledFilter));
       }
     );
   }
@@ -224,8 +225,35 @@ export class CollectionClient<T extends Record<string, any> = Record<string, any
         return false;
       if ("$nin" in conditions && (conditions["$nin"] as unknown[]).includes(fieldValue))
         return false;
+      if ("$regex" in conditions) {
+        let re = conditions["$regex"];
+        if (typeof fieldValue !== "string") return false;
+        if (!(re instanceof RegExp)) {
+          re = new RegExp(re);
+        }
+        re.lastIndex = 0;
+        if (!re.test(fieldValue)) return false;
+      }
     }
     return true;
+  }
+
+  private precompileRegexes(filter: QueryFilter<T>): QueryFilter<T> {
+    const compiled: Record<string, any> = {};
+    for (const [key, condition] of Object.entries(filter)) {
+      if (condition !== null && typeof condition === "object") {
+        const conditions = { ...condition } as Record<string, any>;
+        const isOperatorObject = Object.keys(conditions).some((k) => k.startsWith("$"));
+        if (isOperatorObject && "$regex" in conditions) {
+          const regex = conditions["$regex"];
+          conditions["$regex"] = regex instanceof RegExp ? regex : new RegExp(regex);
+        }
+        compiled[key] = conditions;
+      } else {
+        compiled[key] = condition;
+      }
+    }
+    return compiled as QueryFilter<T>;
   }
 }
 
